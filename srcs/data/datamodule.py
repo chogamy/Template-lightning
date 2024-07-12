@@ -9,6 +9,8 @@ from torch.utils.data import DataLoader
 from .preprocess import PREPROCESS
 from .load import LOAD
 
+KEYS = []
+
 
 @dataclass
 class Collator:
@@ -16,7 +18,10 @@ class Collator:
         # features: list of dict
         batch = {}
         for key in features[0].keys():
-            batch[key] = torch.tensor([feature[key] for feature in features])
+            if key in KEYS:
+                batch[key] = torch.tensor([feature[key] for feature in features])
+            else:
+                batch[key] = [feature[key] for feature in features]
 
         return batch
 
@@ -27,99 +32,69 @@ class DataModule(L.LightningDataModule):
 
         self.args = args
         self.tokenizer = tokenizer
-        self.prompt = "task1: predict the length of a target \ntask2: predict a target for the length"
 
     def setup(self, stage) -> None:
-        dir = os.path.join(os.getcwd(), "data", self.args.data, "cache")
+        def load_and_preprocess_data(split_name, remove_columns, tokenizers):
+            if os.path.exists(os.path.join(dir, split_name)):
+                dataset = load_from_disk(os.path.join(dir, split_name))
+            else:
+                os.makedirs(os.path.join(dir, split_name), exist_ok=True)
+                dataset = LOAD[self.args.data](self.args, split_name)
+
+                dataset = dataset.map(
+                    PREPROCESS[self.args.data],
+                    remove_columns=remove_columns,
+                    fn_kwargs={
+                        "tokenizers": tokenizers,
+                        "max_length": self.args.max_length,
+                    },
+                    load_from_cache_file=True,
+                    keep_in_memory=True,
+                    desc="Pre-processing",
+                    batched=True,
+                )
+
+                dataset.save_to_disk(os.path.join(dir, split_name))
+
+            return dataset
+
         remove_columns = []
         if stage == "fit":
-
-            # train set
-            if os.path.exists(os.path.join(dir, "train")):
-                self.train = load_from_disk(os.path.join(dir, "train"))
-            else:
-                os.makedirs(os.path.join(dir, "train"), exist_ok=True)
-                self.train = LOAD[self.args.data]("train")
-
-                self.train = self.train.map(
-                    PREPROCESS[self.args.data],
-                    remove_columns=remove_columns,
-                    fn_kwargs={
-                        "tokenizer": self.tokenizer,
-                        "prompt": self.prompt,
-                        "split": "train",
-                    },
-                    load_from_cache_file=True,
-                    keep_in_memory=True,
-                    desc="Pre-processing",
-                    batched=True,
-                )
-
-                self.train.save_to_disk(os.path.join(dir, "train"))
-
-            # valid set
-            if os.path.exists(os.path.join(dir, "valid")):
-                self.valid = load_from_disk(os.path.join(dir, "valid"))
-            else:
-                os.makedirs(os.path.join(dir, "valid"), exist_ok=True)
-                self.valid = LOAD[self.args.data]("validation")
-
-                self.valid = self.valid.map(
-                    PREPROCESS[self.args.data],
-                    remove_columns=remove_columns,
-                    fn_kwargs={
-                        "tokenizer": self.tokenizer,
-                        "prompt": self.prompt,
-                        "split": "valid",
-                    },
-                    load_from_cache_file=True,
-                    keep_in_memory=True,
-                    desc="Pre-processing",
-                    batched=True,
-                )
-
-                self.valid.save_to_disk(os.path.join(dir, "valid"))
+            self.train = load_and_preprocess_data(
+                "train", remove_columns, self.tokenizer
+            )
+            self.valid = load_and_preprocess_data(
+                "valid", remove_columns, self.tokenizer
+            )
 
         if stage == "test":
-            if os.path.exists(os.path.join(dir, "test")):
-                self.test = load_from_disk(os.path.join(dir, "test"))
-            else:
-                os.makedirs(os.path.join(dir, "test"), exist_ok=True)
-                self.test = LOAD[self.args.data]("test")
-
-                self.test = self.test.map(
-                    PREPROCESS[self.args.data],
-                    remove_columns=remove_columns,
-                    fn_kwargs={
-                        "tokenizer": self.tokenizer,
-                        "prompt": self.prompt,
-                        "split": "test",
-                    },
-                    load_from_cache_file=True,
-                    keep_in_memory=True,
-                    desc="Pre-processing",
-                    batched=True,
-                )
+            self.test = load_and_preprocess_data("test", remove_columns, self.tokenizer)
 
     def train_dataloader(self):
         return DataLoader(
             self.train,
             collate_fn=Collator(),
-            batch_size=self.args.trainer_args["limit_train_batches"],
+            batch_size=self.args.batch_size,
+            num_workers=8,
+            persistent_workers=True,
         )
 
     def val_dataloader(self):
         return DataLoader(
             self.valid,
             collate_fn=Collator(),
-            batch_size=self.args.trainer_args["limit_val_batches"],
+            batch_size=self.args.batch_size,
+            num_workers=8,
+            persistent_workers=True,
         )
 
     def test_dataloader(self):
         return DataLoader(
             self.test,
             collate_fn=Collator(),
-            batch_size=self.args.trainer_args["limit_test_batches"],
+            batch_size=self.args.batch_size,
+            num_workers=8,
+            persistent_workers=True,
         )
 
     def predict_dataloader(self):
@@ -127,5 +102,7 @@ class DataModule(L.LightningDataModule):
         return DataLoader(
             self.test,
             collate_fn=Collator(),
-            batch_size=self.args.trainer_args["limit_predict_batches"],
+            batch_size=self.args.batch_size,
+            num_workers=8,
+            persistent_workers=True,
         )
